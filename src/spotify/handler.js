@@ -5,6 +5,7 @@ import Song from '../../models/Songs.js';
 import SpotifyToken from '../../models/SpotifyToken.js';
 import SpotifyPlaylist from '../../models/SpotifyPlaylist.js';
 import { SongsSearchService } from '../songsSearch/service.js';
+import User from '../../models/User.js';
 
 function generateRandomString(num) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -104,11 +105,13 @@ class Handler {
             // Calculate expiration time
             const expiresAt = new Date(Date.now() + expires_in * 1000);
 
+            const user = await User.findOne({ clerkId: userId})
+
             // Store or update token in database
             await SpotifyToken.findOneAndUpdate(
-                { userId },
+                { _id: user?._id },
                 {
-                    userId,
+                    userId: user?._id,
                     accessToken: access_token,
                     refreshToken: refresh_token,
                     expiresAt,
@@ -166,7 +169,7 @@ class Handler {
 
     async fetchPlaylists(req, res) {
         try {
-            const { userId } = req.body;
+            let { userId } = req.user;
 
             if (!userId) {
                 return res.status(400).json({
@@ -174,6 +177,9 @@ class Handler {
                     message: 'userId is required'
                 });
             }
+
+            const user = await User.findOne({ clerkId: userId });
+            userId = user?._id;
 
             const accessToken = await this.getAccessToken(userId);
 
