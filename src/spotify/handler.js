@@ -166,6 +166,35 @@ class Handler {
         return tokenData.accessToken;
     }
 
+    async getStoredPlaylists(req, res) {
+        try {
+            let { userId } = req.user;
+
+            if (!userId) {
+                return res.status(400).json({
+                    status: false,
+                    message: 'userId is required'
+                });
+            }
+
+            // Just fetch stored playlists from database
+            const storedPlaylists = await SpotifyPlaylist.find({ userId }).sort({ name: 1 });
+            console.log(`Returning ${storedPlaylists.length} stored playlists for user ${userId}`)
+            
+            res.status(200).json({
+                status: true,
+                data: storedPlaylists
+            });
+
+        } catch (err) {
+            console.log(`Error in get stored playlists: ${err}`);
+            res.status(500).json({
+                status: false,
+                message: `Internal Error: ${err.message}`
+            })
+        }
+    }
+
     async fetchPlaylists(req, res) {
         try {
             let { userId } = req.user;
@@ -179,6 +208,8 @@ class Handler {
 
             const accessToken = await this.getAccessToken(userId?.toString());
 
+            console.log("ACCESSTOKEN", accessToken)
+
             // Fetch playlists from Spotify
             const playlistsResponse = await axios.get('https://api.spotify.com/v1/me/playlists', {
                 headers: {
@@ -186,59 +217,75 @@ class Handler {
                 },
                 params: {
                     limit: 50
-                }
+                },
+                timeout: 30000 // 30 second timeout for Spotify API
             });
 
+            
             const spotifyPlaylists = playlistsResponse.data.items;
+            console.log(`Fetched ${spotifyPlaylists.length} playlists from Spotify`)
 
-            // Store playlists in database
+            // Process playlists with better error handling
+            const processedPlaylists = [];
+            
             for (const playlist of spotifyPlaylists) {
-                // Fetch full playlist details to get tracks
-                const detailsResponse = await axios.get(
-                    `https://api.spotify.com/v1/playlists/${playlist.id}`,
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${accessToken}`
+                try {
+                    // Fetch full playlist details to get tracks
+                    const detailsResponse = await axios.get(
+                        `https://api.spotify.com/v1/playlists/${playlist.id}`,
+                        {
+                            headers: {
+                                'Authorization': `Bearer ${accessToken}`
+                            },
+                            timeout: 15000 // 15 second timeout per playlist
                         }
-                    }
-                );
+                    );
 
-                const details = detailsResponse.data;
-                const tracks = details.tracks.items.map(item => ({
-                    spotifyId: item.track?.id,
-                    name: item.track?.name,
-                    artists: item.track?.artists?.map(a => a.name) || [],
-                    album: item.track?.album?.name,
-                    duration: item.track?.duration_ms,
-                    previewUrl: item.track?.preview_url
-                })).filter(t => t.spotifyId);
+                    const details = detailsResponse.data;
+                    const tracks = details.tracks.items.map(item => ({
+                        spotifyId: item.track?.id,
+                        name: item.track?.name,
+                        artists: item.track?.artists?.map(a => a.name) || [],
+                        album: item.track?.album?.name,
+                        duration: item.track?.duration_ms,
+                        previewUrl: item.track?.preview_url
+                    })).filter(t => t.spotifyId);
 
-                // Check if already migrated
-                const existingPlaylist = await Playlist.findOne({ 
-                    userId, 
-                    spotifyId: playlist.id 
-                });
+                    // Check if already migrated
+                    const existingPlaylist = await Playlist.findOne({ 
+                        userId, 
+                        spotifyId: playlist.id 
+                    });
 
-                await SpotifyPlaylist.findOneAndUpdate(
-                    { userId, spotifyId: playlist.id },
-                    {
-                        userId,
-                        spotifyId: playlist.id,
-                        name: playlist.name,
-                        description: playlist.description || '',
-                        imageUrl: playlist.images?.[0]?.url || null,
-                        totalTracks: details.tracks.total,
-                        tracks,
-                        migrated: !!existingPlaylist,
-                        migratedPlaylistId: existingPlaylist?._id
-                    },
-                    { upsert: true, new: true }
-                );
+                    const savedPlaylist = await SpotifyPlaylist.findOneAndUpdate(
+                        { userId, spotifyId: playlist.id },
+                        {
+                            userId,
+                            spotifyId: playlist.id,
+                            name: playlist.name,
+                            description: playlist.description || '',
+                            imageUrl: playlist.images?.[0]?.url || null,
+                            totalTracks: details.tracks.total,
+                            tracks,
+                            migrated: !!existingPlaylist,
+                            migratedPlaylistId: existingPlaylist?._id
+                        },
+                        { upsert: true, new: true }
+                    );
+                    
+                    processedPlaylists.push(savedPlaylist);
+                    console.log(`Processed playlist: ${playlist.name}`);
+                } catch (playlistError) {
+                    console.error(`Error processing playlist ${playlist.name}:`, playlistError.message);
+                    // Continue with other playlists even if one fails
+                }
             }
 
-            // Fetch stored playlists with migration status
-            const storedPlaylists = await SpotifyPlaylist.find({ userId });
-
+            // Fetch all stored playlists with migration status
+            console.log("Fetching stored playlists")
+            const storedPlaylists = await SpotifyPlaylist.find({ userId }).sort({ name: 1 });
+            console.log(`Returning ${storedPlaylists.length} playlists`)
+            
             res.status(200).json({
                 status: true,
                 data: storedPlaylists
