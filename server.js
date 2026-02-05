@@ -9,6 +9,7 @@ import songsSearchRoutes from './src/songsSearch/route.js';
 import playlistRoutes from './src/playlist/route.js';
 import wishlistRoutes from './src/wishlist/route.js';
 import historyRoutes from './src/history/route.js';
+import spotifyRoutes from './src/spotify/route.js';
 import { getClerkClient } from './src/client/createClerkCleint.js';
 
 
@@ -26,6 +27,7 @@ app.use('/api/songs', songsSearchRoutes);
 app.use('/api/playlists', authMiddleware, playlistRoutes);
 app.use('/api/wishlist', authMiddleware, wishlistRoutes);
 app.use('/api/history', authMiddleware, historyRoutes);
+app.use('/api/spotify', authMiddleware, spotifyRoutes)
 
 // Health check
 app.get('/health', (req, res) => {
