@@ -1,13 +1,16 @@
 import express from "express"
 import Handler from "./handler.js";
+import { authMiddleware } from "../../middleware/auth.js";
 
 const router = express.Router();
 const handler = new Handler();
 
-router.get('/auth', handler.auth);
+router.post('/auth', authMiddleware, handler.auth.bind(handler));
 
-router.get('/auth/callback', handler.authCallback);
+router.get('/auth/callback', handler.authCallback.bind(handler));
 
-router.post('/migrate', handler.migratePlaylist.bind(handler));
+router.post('/playlists', authMiddleware, handler.fetchPlaylists.bind(handler));
+
+router.post('/migrate', authMiddleware, handler.migratePlaylist.bind(handler));
 
 export default router;

@@ -2,6 +2,8 @@ import querystring from 'querystring';
 import axios from "axios";
 import Playlist from '../../models/Playlist.js';
 import Song from '../../models/Songs.js';
+import SpotifyToken from '../../models/SpotifyToken.js';
+import SpotifyPlaylist from '../../models/SpotifyPlaylist.js';
 import { SongsSearchService } from '../songsSearch/service.js';
 
 function generateRandomString(num) {
@@ -18,7 +20,28 @@ function generateRandomString(num) {
 class Handler {
     async auth(req, res) {
         try {
-            var state = generateRandomString(16);
+            const { userId } = req.body;
+
+            if (!userId) {
+                return res.status(400).json({
+                    status: false,
+                    message: 'userId is required'
+                });
+            }
+
+            // Check if user already has valid token
+            const existingToken = await SpotifyToken.findOne({ userId });
+            if (existingToken && existingToken.expiresAt > new Date()) {
+                return res.status(200).json({
+                    status: true,
+                    data: {
+                        authenticated: true,
+                        message: 'Already authenticated with Spotify'
+                    }
+                });
+            }
+
+            var state = generateRandomString(16) + ':' + userId; // Include userId in state
             var scope = 'user-read-private user-read-email playlist-read-private playlist-read-collaborative user-library-read';
 
             const authUrl = 'https://accounts.spotify.com/authorize?' +
@@ -30,7 +53,6 @@ class Handler {
                     state: state
                 });
 
-            // Return the auth URL instead of redirecting
             res.status(200).json({
                 status: true,
                 data: {
@@ -53,39 +75,175 @@ class Handler {
             var state = req.query.state || null;
 
             if (state === null) {
-                res.redirect('/#' +
-                    querystring.stringify({
-                        error: 'state_mismatch'
-                    }));
-            } else {
-                var authOptions = {
-                    url: 'https://accounts.spotify.com/api/token',
-                    form: {
-                        code: code,
-                        redirect_uri: process.env.SPOTIFY_REDIRECT_URL,
-                        grant_type: 'authorization_code'
-                    },
+                return res.redirect('myapp://spotify-callback?error=state_mismatch');
+            }
+
+            // Extract userId from state
+            const userId = state.split(':')[1];
+            if (!userId) {
+                return res.redirect('myapp://spotify-callback?error=invalid_state');
+            }
+
+            const tokenResponse = await axios.post(
+                'https://accounts.spotify.com/api/token',
+                querystring.stringify({
+                    code: code,
+                    redirect_uri: process.env.SPOTIFY_REDIRECT_URL,
+                    grant_type: 'authorization_code'
+                }),
+                {
                     headers: {
                         'content-type': 'application/x-www-form-urlencoded',
                         'Authorization': 'Basic ' + (Buffer.from(process.env.SPOTIFY_CLIENT_ID + ':' + process.env.SPOTIFY_CLIENT_SECRET).toString('base64'))
-                    },
-                    json: true
-                };
-
-                const response = await axios.request(authOptions);
-                console.log("SPOTIFY RESPONSE", response.data)
-                // TODO: Make request to Spotify token endpoint
-                // For now, just return success
-                res.status(200).json({
-                    status: true,
-                    data: {
-                        success: true,
-                        message: 'Authentication successful'
                     }
-                });
-            }
+                }
+            );
+
+            const { access_token, refresh_token, expires_in, scope } = tokenResponse.data;
+
+            // Calculate expiration time
+            const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+            // Store or update token in database
+            await SpotifyToken.findOneAndUpdate(
+                { userId },
+                {
+                    userId,
+                    accessToken: access_token,
+                    refreshToken: refresh_token,
+                    expiresAt,
+                    scope
+                },
+                { upsert: true, new: true }
+            );
+
+            // Redirect back to app with success
+            res.redirect('myapp://spotify-callback?success=true');
+
         } catch (err) {
             console.log(`Error in spotify auth callback: ${err}`)
+            res.redirect('myapp://spotify-callback?error=auth_failed');
+        }
+    }
+
+    async getAccessToken(userId) {
+        const tokenData = await SpotifyToken.findOne({ userId });
+        
+        if (!tokenData) {
+            throw new Error('No Spotify token found. Please authenticate first.');
+        }
+
+        // Check if token is expired
+        if (tokenData.expiresAt <= new Date()) {
+            // Refresh the token
+            const refreshResponse = await axios.post(
+                'https://accounts.spotify.com/api/token',
+                querystring.stringify({
+                    grant_type: 'refresh_token',
+                    refresh_token: tokenData.refreshToken
+                }),
+                {
+                    headers: {
+                        'content-type': 'application/x-www-form-urlencoded',
+                        'Authorization': 'Basic ' + (Buffer.from(process.env.SPOTIFY_CLIENT_ID + ':' + process.env.SPOTIFY_CLIENT_SECRET).toString('base64'))
+                    }
+                }
+            );
+
+            const { access_token, expires_in } = refreshResponse.data;
+            const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+            // Update token in database
+            tokenData.accessToken = access_token;
+            tokenData.expiresAt = expiresAt;
+            await tokenData.save();
+
+            return access_token;
+        }
+
+        return tokenData.accessToken;
+    }
+
+    async fetchPlaylists(req, res) {
+        try {
+            const { userId } = req.body;
+
+            if (!userId) {
+                return res.status(400).json({
+                    status: false,
+                    message: 'userId is required'
+                });
+            }
+
+            const accessToken = await this.getAccessToken(userId);
+
+            // Fetch playlists from Spotify
+            const playlistsResponse = await axios.get('https://api.spotify.com/v1/me/playlists', {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                params: {
+                    limit: 50
+                }
+            });
+
+            const spotifyPlaylists = playlistsResponse.data.items;
+
+            // Store playlists in database
+            for (const playlist of spotifyPlaylists) {
+                // Fetch full playlist details to get tracks
+                const detailsResponse = await axios.get(
+                    `https://api.spotify.com/v1/playlists/${playlist.id}`,
+                    {
+                        headers: {
+                            'Authorization': `Bearer ${accessToken}`
+                        }
+                    }
+                );
+
+                const details = detailsResponse.data;
+                const tracks = details.tracks.items.map(item => ({
+                    spotifyId: item.track?.id,
+                    name: item.track?.name,
+                    artists: item.track?.artists?.map(a => a.name) || [],
+                    album: item.track?.album?.name,
+                    duration: item.track?.duration_ms,
+                    previewUrl: item.track?.preview_url
+                })).filter(t => t.spotifyId);
+
+                // Check if already migrated
+                const existingPlaylist = await Playlist.findOne({ 
+                    userId, 
+                    spotifyId: playlist.id 
+                });
+
+                await SpotifyPlaylist.findOneAndUpdate(
+                    { userId, spotifyId: playlist.id },
+                    {
+                        userId,
+                        spotifyId: playlist.id,
+                        name: playlist.name,
+                        description: playlist.description || '',
+                        imageUrl: playlist.images?.[0]?.url || null,
+                        totalTracks: details.tracks.total,
+                        tracks,
+                        migrated: !!existingPlaylist,
+                        migratedPlaylistId: existingPlaylist?._id
+                    },
+                    { upsert: true, new: true }
+                );
+            }
+
+            // Fetch stored playlists with migration status
+            const storedPlaylists = await SpotifyPlaylist.find({ userId });
+
+            res.status(200).json({
+                status: true,
+                data: storedPlaylists
+            });
+
+        } catch (err) {
+            console.log(`Error in fetch playlists: ${err}`);
             res.status(500).json({
                 status: false,
                 message: `Internal Error: ${err.message}`
@@ -95,156 +253,128 @@ class Handler {
 
     async migratePlaylist(req, res) {
         try {
-            const { accessToken, userId } = req.body;
+            const { userId, spotifyPlaylistId } = req.body;
 
-            if (!accessToken || !userId) {
+            if (!userId || !spotifyPlaylistId) {
                 return res.status(400).json({
                     status: false,
-                    message: 'Access token and userId are required'
+                    message: 'userId and spotifyPlaylistId are required'
                 });
             }
 
-            // Step 1: Get user's Spotify playlists
-            const playlistsResponse = await axios.get('https://api.spotify.com/v1/me/playlists', {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`
-                }
+            // Get Spotify playlist from database
+            const spotifyPlaylist = await SpotifyPlaylist.findOne({ 
+                userId, 
+                spotifyId: spotifyPlaylistId 
             });
 
-            const spotifyPlaylists = playlistsResponse.data.items;
-            const migrationResults = [];
+            if (!spotifyPlaylist) {
+                return res.status(404).json({
+                    status: false,
+                    message: 'Spotify playlist not found'
+                });
+            }
 
-            // Step 2: Process each playlist
-            for (const spotifyPlaylist of spotifyPlaylists) {
+            if (spotifyPlaylist.migrated) {
+                return res.status(400).json({
+                    status: false,
+                    message: 'Playlist already migrated'
+                });
+            }
+
+            // Create new playlist
+            const newPlaylist = new Playlist({
+                name: spotifyPlaylist.name,
+                userId: userId,
+                imageUrl: spotifyPlaylist.imageUrl,
+                description: spotifyPlaylist.description,
+                spotifyId: spotifyPlaylist.spotifyId,
+                songs: []
+            });
+
+            await newPlaylist.save();
+
+            const migratedSongs = [];
+            const failedSongs = [];
+
+            // Migrate each track
+            for (const track of spotifyPlaylist.tracks) {
+                const searchQuery = `${track.name} ${track.artists.join(' ')}`;
+
                 try {
-                    // Get full playlist details including tracks
-                    const playlistDetailsResponse = await axios.get(
-                        `https://api.spotify.com/v1/playlists/${spotifyPlaylist.id}`,
-                        {
-                            headers: {
-                                'Authorization': `Bearer ${accessToken}`
-                            }
-                        }
-                    );
-
-                    const playlistDetails = playlistDetailsResponse.data;
+                    const searchResult = await SongsSearchService.searchSongs(searchQuery);
                     
-                    // Create playlist in our database
-                    const newPlaylist = new Playlist({
-                        name: playlistDetails.name,
-                        userId: userId,
-                        imageUrl: playlistDetails.images?.[0]?.url || null,
-                        description: playlistDetails.description || '',
-                        spotifyId: playlistDetails.id,
-                        songs: []
-                    });
-
-                    await newPlaylist.save();
-
-                    const migratedSongs = [];
-                    const failedSongs = [];
-
-                    // Step 3: Process each track in the playlist
-                    const tracks = playlistDetails.tracks.items;
-                    
-                    for (const item of tracks) {
-                        if (!item.track) continue;
-
-                        const track = item.track;
-                        const artistNames = track.artists.map(a => a.name).join(', ');
-                        const searchQuery = `${track.name} ${artistNames}`;
-
-                        try {
-                            // Search for song on JioSaavn
-                            const searchResult = await SongsSearchService.searchSongs(searchQuery);
-                            
-                            if (searchResult.status && searchResult.results && searchResult.results.length > 0) {
-                                const jiosaavnSong = searchResult.results[0];
-                                
-                                // Check if song already exists in database
-                                let song = await Song.findOne({ id: jiosaavnSong.id });
-                                
-                                if (!song) {
-                                    // Create new song
-                                    song = new Song({
-                                        id: jiosaavnSong.id,
-                                        name: jiosaavnSong.name,
-                                        type: jiosaavnSong.type,
-                                        year: jiosaavnSong.year,
-                                        releaseDate: jiosaavnSong.releaseDate,
-                                        duration: jiosaavnSong.duration,
-                                        label: jiosaavnSong.label,
-                                        explicitContent: jiosaavnSong.explicitContent,
-                                        playCount: jiosaavnSong.playCount,
-                                        language: jiosaavnSong.language,
-                                        hasLyrics: jiosaavnSong.hasLyrics,
-                                        lyricsId: jiosaavnSong.lyricsId,
-                                        url: jiosaavnSong.url,
-                                        copyright: jiosaavnSong.copyright,
-                                        album: jiosaavnSong.album,
-                                        artists: jiosaavnSong.artists,
-                                        image: jiosaavnSong.image,
-                                        downloadUrl: jiosaavnSong.downloadUrl
-                                    });
-                                    
-                                    await song.save();
-                                }
-
-                                // Add song to playlist
-                                newPlaylist.songs.push(song._id);
-                                migratedSongs.push({
-                                    spotifyName: track.name,
-                                    jiosaavnName: jiosaavnSong.name,
-                                    matched: true
-                                });
-                            } else {
-                                failedSongs.push({
-                                    name: track.name,
-                                    artist: artistNames,
-                                    reason: 'No match found on JioSaavn'
-                                });
-                            }
-                        } catch (songError) {
-                            console.error(`Error migrating song ${track.name}:`, songError);
-                            failedSongs.push({
-                                name: track.name,
-                                artist: artistNames,
-                                reason: songError.message
+                    if (searchResult.status && searchResult.results && searchResult.results.length > 0) {
+                        const jiosaavnSong = searchResult.results[0];
+                        
+                        let song = await Song.findOne({ id: jiosaavnSong.id });
+                        
+                        if (!song) {
+                            song = new Song({
+                                id: jiosaavnSong.id,
+                                name: jiosaavnSong.name,
+                                type: jiosaavnSong.type,
+                                year: jiosaavnSong.year,
+                                releaseDate: jiosaavnSong.releaseDate,
+                                duration: jiosaavnSong.duration,
+                                label: jiosaavnSong.label,
+                                explicitContent: jiosaavnSong.explicitContent,
+                                playCount: jiosaavnSong.playCount,
+                                language: jiosaavnSong.language,
+                                hasLyrics: jiosaavnSong.hasLyrics,
+                                lyricsId: jiosaavnSong.lyricsId,
+                                url: jiosaavnSong.url,
+                                copyright: jiosaavnSong.copyright,
+                                album: jiosaavnSong.album,
+                                artists: jiosaavnSong.artists,
+                                image: jiosaavnSong.image,
+                                downloadUrl: jiosaavnSong.downloadUrl
                             });
+                            
+                            await song.save();
                         }
 
-                        // Add small delay to avoid rate limiting
-                        await new Promise(resolve => setTimeout(resolve, 200));
+                        newPlaylist.songs.push(song._id);
+                        migratedSongs.push({
+                            spotifyName: track.name,
+                            jiosaavnName: jiosaavnSong.name
+                        });
+                    } else {
+                        failedSongs.push({
+                            name: track.name,
+                            artists: track.artists,
+                            reason: 'No match found on JioSaavn'
+                        });
                     }
-
-                    // Save playlist with all songs
-                    await newPlaylist.save();
-
-                    migrationResults.push({
-                        playlistName: playlistDetails.name,
-                        playlistId: newPlaylist._id,
-                        totalTracks: tracks.length,
-                        migratedCount: migratedSongs.length,
-                        failedCount: failedSongs.length,
-                        migratedSongs: migratedSongs,
-                        failedSongs: failedSongs
-                    });
-
-                } catch (playlistError) {
-                    console.error(`Error migrating playlist ${spotifyPlaylist.name}:`, playlistError);
-                    migrationResults.push({
-                        playlistName: spotifyPlaylist.name,
-                        error: playlistError.message,
-                        success: false
+                } catch (songError) {
+                    console.error(`Error migrating song ${track.name}:`, songError);
+                    failedSongs.push({
+                        name: track.name,
+                        artists: track.artists,
+                        reason: songError.message
                     });
                 }
+
+                await new Promise(resolve => setTimeout(resolve, 200));
             }
+
+            await newPlaylist.save();
+
+            // Update Spotify playlist as migrated
+            spotifyPlaylist.migrated = true;
+            spotifyPlaylist.migratedPlaylistId = newPlaylist._id;
+            await spotifyPlaylist.save();
 
             res.status(200).json({
                 status: true,
                 data: {
-                    totalPlaylists: spotifyPlaylists.length,
-                    results: migrationResults
+                    playlistId: newPlaylist._id,
+                    playlistName: newPlaylist.name,
+                    totalTracks: spotifyPlaylist.tracks.length,
+                    migratedCount: migratedSongs.length,
+                    failedCount: failedSongs.length,
+                    migratedSongs,
+                    failedSongs
                 }
             });
 

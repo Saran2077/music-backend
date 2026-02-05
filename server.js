@@ -27,7 +27,7 @@ app.use('/api/songs', songsSearchRoutes);
 app.use('/api/playlists', authMiddleware, playlistRoutes);
 app.use('/api/wishlist', authMiddleware, wishlistRoutes);
 app.use('/api/history', authMiddleware, historyRoutes);
-app.use('/api/spotify', authMiddleware, spotifyRoutes)
+app.use('/api/spotify', spotifyRoutes)
 
 // Health check
 app.get('/health', (req, res) => {
