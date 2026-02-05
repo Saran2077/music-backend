@@ -302,7 +302,8 @@ class Handler {
 
     async migratePlaylist(req, res) {
         try {
-            const { userId, spotifyPlaylistId } = req.body;
+            const { spotifyPlaylistId } = req.body;
+            const { userId } = req.user;
 
             if (!userId || !spotifyPlaylistId) {
                 return res.status(400).json({
