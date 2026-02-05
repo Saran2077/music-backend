@@ -21,7 +21,7 @@ function generateRandomString(num) {
 class Handler {
     async auth(req, res) {
         try {
-            const { userId } = req.body;
+            const { userId } = req.user;
 
             if (!userId) {
                 return res.status(400).json({
@@ -105,13 +105,12 @@ class Handler {
             // Calculate expiration time
             const expiresAt = new Date(Date.now() + expires_in * 1000);
 
-            const user = await User.findOne({ clerkId: userId})
 
             // Store or update token in database
             await SpotifyToken.findOneAndUpdate(
-                { _id: user?._id },
+                { _id: userId },
                 {
-                    userId: user?._id,
+                    userId,
                     accessToken: access_token,
                     refreshToken: refresh_token,
                     expiresAt,
@@ -178,10 +177,7 @@ class Handler {
                 });
             }
 
-            const user = await User.findOne({ clerkId: userId });
-            userId = user?._id;
-
-            const accessToken = await this.getAccessToken(userId);
+            const accessToken = await this.getAccessToken(userId?.toString());
 
             // Fetch playlists from Spotify
             const playlistsResponse = await axios.get('https://api.spotify.com/v1/me/playlists', {
