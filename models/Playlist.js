@@ -9,6 +9,15 @@ const playlistSchema = new mongoose.Schema({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
+    },
+    imageUrl: {
+        type: String
+    },
+    description: {
+        type: String
+    },
+    spotifyId: {
+        type: String
     }
 }, { timestamps: true })
 

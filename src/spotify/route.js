@@ -8,4 +8,6 @@ router.get('/auth', handler.auth);
 
 router.get('/auth/callback', handler.authCallback);
 
+router.post('/migrate', handler.migratePlaylist.bind(handler));
+
 export default router;

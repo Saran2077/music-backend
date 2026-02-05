@@ -4,7 +4,7 @@ import User from '../../models/User.js';
 
 export class PlaylistService {
   // Create a new playlist
-  static async createPlaylist(userId, name) {
+  static async createPlaylist(userId, name, imageUrl = null, description = '') {
     try {
       const user = await User.findById(userId);
       if (!user) {
@@ -14,7 +14,9 @@ export class PlaylistService {
       const playlist = new Playlist({
         name,
         userId,
-        songs: []
+        songs: [],
+        imageUrl,
+        description
       });
 
       await playlist.save();
